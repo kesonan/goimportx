@@ -1,12 +1,14 @@
 package importx
 
 import (
+	"bytes"
+	"fmt"
 	"go/ast"
 	"go/format"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,170 +19,237 @@ import (
 )
 
 const (
-	SystemPkg Type = 1 << iota
-	LocalPkg
-	ThirdPkg
+	gomodFile       = "go.mod"
+	groupNameSystem = "system"
+	groupNameLocal  = "local"
+	groupNameThird  = "third"
+	groupNameOthers = "others"
 )
 
-var pkgIndex = map[Type]int{
-	SystemPkg: 1,
-	LocalPkg:  2,
-	ThirdPkg:  3,
-}
+var (
+	validGroupRule = map[string]struct{}{
+		groupNameSystem: {},
+		groupNameLocal:  {},
+		groupNameThird:  {},
+		groupNameOthers: {},
+	}
 
-type Type int
+	groupSort = map[string]int{
+		groupNameSystem: 0,
+		groupNameLocal:  1,
+		groupNameThird:  2,
+		groupNameOthers: 3,
+	}
+)
 
 type Sorter interface {
-	Sort(list []ImportPath) [][]ImportPath
+	Group(list []ImportPath) [][]ImportPath
+	Sort(list []ImportPath) []ImportPath
 }
+
+type commentGroup struct {
+	doc, comment *ast.CommentGroup
+}
+
+type commentGroups []*ast.CommentGroup
 
 type ImportPath struct {
-	name       string
-	value      string
-	use        bool
-	modulePath string
+	name         string
+	value        string
+	use          bool
+	modulePath   string
+	commentGroup *commentGroup
 }
 
-func (ip ImportPath) PackageType() Type {
+func (cg commentGroups) in(comment *ast.CommentGroup) bool {
+	for _, v := range cg {
+		if v == nil {
+			continue
+		}
+		if comment.Pos() >= v.Pos() && comment.End() <= v.End() {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (ip ImportPath) PackageType() string {
 	// Inspired by https://cs.opensource.google/go/x/tools/+/master:go/ast/astutil/imports.go;l=196
 	if strings.Contains(ip.value, ".") {
-		return ThirdPkg
+		return groupNameThird
 	}
 
 	if len(ip.modulePath) > 0 && strings.HasPrefix(ip.value, ip.modulePath) {
-		return LocalPkg
+		return groupNameLocal
 	}
 
-	return SystemPkg
+	return groupNameSystem
 }
 
 func Sort(filename string, sorter Sorter) error {
+	if sorter == nil {
+		sorter = &ImportSorter{}
+	}
+
 	_, err := os.Stat(filename)
 	if err != nil {
 		return err
 	}
 
-	var modulePath string
-	if err := walkDir(filename, func(path string, d fs.DirEntry, err error) error {
-		if len(modulePath) > 0 {
-			return filepath.SkipAll
-		}
+	moduleFilename := getGoModFile(filename)
+	if len(moduleFilename) == 0 {
+		return fmt.Errorf("can not find go.mod file")
+	}
 
-		if d.IsDir() {
-			return nil
-		}
-
-		if filepath.Ext(path) == ".mod" {
-			data, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-
-			f, err := modfile.Parse(path, data, nil)
-			if err != nil {
-				return err
-			}
-			if f.Module == nil {
-				return nil
-			}
-			modulePath = f.Module.Mod.Path
-		}
-
-		return nil
-	}); err != nil {
+	data, err := os.ReadFile(moduleFilename)
+	if err != nil {
 		return err
 	}
 
+	modFile, err := modfile.Parse(moduleFilename, data, nil)
+	if err != nil {
+		return err
+	}
+
+	if modFile.Module == nil {
+		return fmt.Errorf("invalid go.mod file: %s", moduleFilename)
+	}
+
+	modulePath := modFile.Module.Mod.Path
+
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, filename, nil, 0)
+	f, err := parser.ParseFile(fset, filename, nil, parser.ParseComments)
 	if err != nil {
 		return err
 	}
 
 	importSet := collection.NewArraySet[ImportPath]()
+	importComment := make(map[string]*commentGroup)
+	var commentGroups commentGroups
 	importSpecIterator(f, modulePath, func(decl *ast.GenDecl, spec ast.Spec, path ImportPath) {
 		importSet.Add(path)
+		importComment[fmt.Sprintf("%s %s", path.name, path.value)] = path.commentGroup
+		commentGroups = append(commentGroups, path.commentGroup.doc, path.commentGroup.comment)
 	})
 
+	var specs []ast.Spec
 	var importUnGroupList = importSet.List()
-	deleteNamedImport(fset, f, importUnGroupList)
+	var groupedImports = sorter.Group(importUnGroupList)
+	for idx, v := range groupedImports {
+		sortedImports := sorter.Sort(v)
+		for _, v := range sortedImports {
+			key := fmt.Sprintf("%s %s", v.name, v.value)
+			cg := importComment[key]
+			var doc, comment string
+			if cg != nil {
+				doc = getCommentGroupString(cg.doc)
+				comment = getCommentGroupString(cg.comment)
+			}
 
-	var importPathList = [][]ImportPath{importUnGroupList}
-	if sorter != nil {
-		importPathList = sorter.Sort(importUnGroupList)
+			if len(doc) > 0 {
+				specs = append(specs, &ast.ImportSpec{
+					Path: &ast.BasicLit{Value: fmt.Sprintf("%s%s", "", doc), Kind: token.STRING},
+				})
+			}
+
+			var spec = ast.ImportSpec{
+				Path: &ast.BasicLit{Value: fmt.Sprintf(`"%s"%s`, v.value, comment), Kind: token.STRING},
+			}
+			if len(v.name) > 0 {
+				spec.Name = ast.NewIdent(v.name)
+			}
+
+			specs = append(specs, &spec)
+		}
+		if idx < len(groupedImports)-1 {
+			specs = append(specs, &ast.ImportSpec{
+				Path: &ast.BasicLit{Value: "", Kind: token.STRING},
+			})
+		}
 	}
 
-	rewriteImport(fset, f, importPathList)
-	ast.SortImports(fset, f)
-	importGroupBounds := getImportGroupBounds(importPathList)
-	addGroupGap(f, modulePath, importGroupBounds)
-	if sorter != nil {
-		if writer, ok := sorter.(io.Writer); ok {
-			_ = format.Node(writer, fset, f)
-		}
+	rewriteImport(fset, f, specs)
+	deletedOriginImportCommentGroup(f, commentGroups)
+	var buffer = bytes.NewBuffer(nil)
+	_ = printer.Fprint(buffer, fset, f)
+
+	result, err := format.Source(buffer.Bytes())
+	if err != nil {
+		return err
+	}
+
+	if writer, ok := sorter.(io.Writer); ok {
+		_, _ = writer.Write(result)
 	}
 
 	return nil
 }
 
-func walkDir(file string, fn fs.WalkDirFunc) error {
-	var lastFile = file
+func deletedOriginImportCommentGroup(f *ast.File, originCommentGroup commentGroups) {
+	var comments []*ast.CommentGroup
+	for _, d := range f.Comments {
+		if d == nil {
+			continue
+		}
+
+		if !originCommentGroup.in(d) {
+			comments = append(comments, d)
+		}
+	}
+	f.Comments = comments
+}
+
+func getCommentGroupString(commentGroup *ast.CommentGroup) string {
+	if commentGroup == nil {
+		return ""
+	}
+
+	var list []string
+	for _, v := range commentGroup.List {
+		list = append(list, v.Text)
+	}
+
+	return " " + strings.Join(list, " ")
+}
+
+func getGoModFile(file string) string {
+	var lastFile = filepath.Clean(file)
 	for {
 		dir := filepath.Dir(lastFile)
 		if lastFile == dir {
-			return nil
+			return ""
 		}
 
-		fileSystem := os.DirFS(dir)
-		err := fs.WalkDir(fileSystem, ".", func(path string, d fs.DirEntry, err error) error {
-			if d.IsDir() {
-				return fn(path, d, err)
-			}
-			return fn(filepath.Join(dir, path), d, err)
-		})
-		if err == fs.SkipAll {
-			return nil
-		}
-		if err != nil {
-			return err
+		expectedGoModFile := filepath.Join(dir, gomodFile)
+		if _, err := os.Stat(expectedGoModFile); err == nil {
+			return expectedGoModFile
 		}
 
 		lastFile = dir
 	}
 }
-func deleteNamedImport(fset *token.FileSet, f *ast.File, importPathList []ImportPath) {
-	for _, v := range importPathList {
-		astutil.DeleteNamedImport(fset, f, v.name, v.value)
-	}
-}
 
-func rewriteImport(fset *token.FileSet, f *ast.File, importPathGroup [][]ImportPath) {
-	for _, group := range importPathGroup {
-		for _, importPath := range group {
-			if !importPath.use {
-				continue
+func rewriteImport(fset *token.FileSet, f *ast.File, specs []ast.Spec) {
+	var written bool
+	var decls []ast.Decl
+	for _, d := range f.Decls {
+		decl, ok := d.(*ast.GenDecl)
+		if !ok || decl.Tok != token.IMPORT {
+			decls = append(decls, decl)
+			continue
+		}
+		if !written {
+			decl.Specs = specs
+			if len(specs) == 1 {
+				decl.Lparen = 0
+				decl.Rparen = 0
 			}
-			astutil.AddNamedImport(fset, f, importPath.name, importPath.value)
+			written = true
+			decls = append(decls, decl)
 		}
 	}
-
-	ast.SortImports(fset, f)
-}
-
-func getImportGroupBounds(importPathGroup [][]ImportPath) map[string]struct{} {
-	var importGroupBounds = make(map[string]struct{})
-	for _, group := range importPathGroup {
-		for i := len(group) - 1; i >= 0; i-- {
-			importPath := group[i]
-			if !importPath.use {
-				continue
-			}
-
-			importGroupBounds[importPath.value] = struct{}{}
-			break
-		}
-	}
-	return importGroupBounds
+	f.Decls = decls
 }
 
 func importSpecIterator(f *ast.File, modulePath string, iterator func(decl *ast.GenDecl, spec ast.Spec, path ImportPath)) {
@@ -210,42 +279,14 @@ func importSpecIterator(f *ast.File, modulePath string, iterator func(decl *ast.
 				value:      value,
 				use:        astutil.UsesImport(f, value),
 				modulePath: modulePath,
+				commentGroup: &commentGroup{
+					doc:     imp.Doc,
+					comment: imp.Comment,
+				},
 			}
 			iterator(decl, spec, importPath)
 		}
 	}
-}
-
-func addGroupGap(f *ast.File, modulePath string, importGroupBounds map[string]struct{}) {
-	importSpecIterator(f, modulePath, func(decl *ast.GenDecl, spec ast.Spec, path ImportPath) {
-		astutil.Apply(decl, nil, func(cursor *astutil.Cursor) bool {
-			if cursor.Node() == nil {
-				return true
-			}
-			if cursor.Name() != "Path" {
-				return true
-			}
-
-			_, ok := cursor.Parent().(*ast.ImportSpec)
-			if !ok {
-				return true
-			}
-
-			basicLit, ok := cursor.Node().(*ast.BasicLit)
-			if !ok {
-				return true
-			}
-
-			value := trimQuote(basicLit.Value)
-			if _, ok := importGroupBounds[value]; ok {
-				basicLit.Value = basicLit.Value + "\n"
-				cursor.Replace(basicLit)
-				return true
-			}
-
-			return true
-		})
-	})
 }
 
 func trimQuote(s string) string {
