@@ -4,26 +4,17 @@ import (
 	"fmt"
 	"go/ast"
 	"go/token"
-	"io"
-	"os"
 	"strings"
 
 	"github.com/anqiansong/goimportx/pkg/mapx"
 	"golang.org/x/tools/go/ast/astutil"
 )
 
-type SorterOption func(s *ImportSorter)
+// ImportSorter provides functionality to sort import paths in Go files.
+type ImportSorter struct{}
 
-func WithWriter(writer io.Writer) SorterOption {
-	return func(s *ImportSorter) {
-		s.writer = writer
-	}
-}
-
-type ImportSorter struct {
-	writer io.Writer
-}
-
+// Sort sorts the import paths in the given list and returns the sorted list.
+// It uses the go/ast and go/token packages to parse and sort the imports.
 func (i *ImportSorter) Sort(list []ImportPath) []ImportPath {
 	fset := token.NewFileSet()
 	file := &ast.File{}
@@ -50,25 +41,8 @@ func (i *ImportSorter) Sort(list []ImportPath) []ImportPath {
 	return result
 }
 
-func (i *ImportSorter) Write(p []byte) (n int, err error) {
-	if i.writer != nil {
-		return i.writer.Write(p)
-	}
-	return 0, nil
-}
-
-func NewImportSorter(opts ...SorterOption) *ImportSorter {
-	instance := &ImportSorter{
-		writer: os.Stdout,
-	}
-
-	for _, o := range opts {
-		o(instance)
-	}
-
-	return instance
-}
-
+// Group groups the import paths by package type and sorts them according to the groupSort rule.
+// It returns a 2D slice where each slice contains import paths of the same package type.
 func (i *ImportSorter) Group(list []ImportPath) [][]ImportPath {
 	var importPathGroup = make(map[string][]ImportPath)
 	for _, importPath := range list {
@@ -85,6 +59,14 @@ func (i *ImportSorter) Group(list []ImportPath) [][]ImportPath {
 	})
 }
 
+// NewImportSorter creates a new instance of ImportSorter with the given options.
+func NewImportSorter() *ImportSorter {
+	return &ImportSorter{}
+}
+
+// InitGroup initializes the groupSort rule with the given string.
+// The string should be a comma-separated list of valid group names.
+// If an invalid group name is encountered, it returns an error.
 func InitGroup(s string) error {
 	if len(s) == 0 {
 		return nil

@@ -8,7 +8,6 @@ import (
 	"go/parser"
 	"go/printer"
 	"go/token"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +23,8 @@ const (
 	groupNameLocal  = "local"
 	groupNameThird  = "third"
 	groupNameOthers = "others"
+
+	goExt = ".go"
 )
 
 var (
@@ -42,6 +43,7 @@ var (
 	}
 )
 
+// Sorter is the interface that wraps the basic Group and Sort method.
 type Sorter interface {
 	Group(list []ImportPath) [][]ImportPath
 	Sort(list []ImportPath) []ImportPath
@@ -53,6 +55,7 @@ type commentGroup struct {
 
 type commentGroups []*ast.CommentGroup
 
+// ImportPath represents an import path with its name, value, use status, module path, and comment group.
 type ImportPath struct {
 	name         string
 	value        string
@@ -74,6 +77,7 @@ func (cg commentGroups) in(comment *ast.CommentGroup) bool {
 	return false
 }
 
+// PackageType returns the package type of the import path.
 func (ip ImportPath) PackageType() string {
 	// Inspired by https://cs.opensource.google/go/x/tools/+/master:go/ast/astutil/imports.go;l=196
 	if strings.Contains(ip.value, ".") {
@@ -87,33 +91,52 @@ func (ip ImportPath) PackageType() string {
 	return groupNameSystem
 }
 
-func Sort(filename string, sorter Sorter) error {
+// Sort reads the go.mod file in the same directory as the given file to determine the module path.
+// The sorted imports will be written back to the file.
+// If sorter implements io.Writer, the formatted file will be written to it instead of being written back to the file.
+// If sorter is nil, use the default.
+func Sort(filename string, sorter Sorter) ([]byte, error) {
 	if sorter == nil {
 		sorter = &ImportSorter{}
 	}
 
-	_, err := os.Stat(filename)
+	abs, err := filepath.Abs(filename)
 	if err != nil {
-		return err
+		return nil, err
+	}
+
+	filename = abs
+	ext := filepath.Ext(filename)
+	if ext != goExt {
+		return nil, fmt.Errorf("expected go files, invalid file extension: %s", ext)
+	}
+
+	fileInfo, err := os.Stat(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	if fileInfo.IsDir() {
+		return nil, fmt.Errorf("expected go files, invalid file path: %s", filename)
 	}
 
 	moduleFilename := getGoModFile(filename)
 	if len(moduleFilename) == 0 {
-		return fmt.Errorf("can not find go.mod file")
+		return nil, fmt.Errorf("can not find go.mod file")
 	}
 
 	data, err := os.ReadFile(moduleFilename)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	modFile, err := modfile.Parse(moduleFilename, data, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if modFile.Module == nil {
-		return fmt.Errorf("invalid go.mod file: %s", moduleFilename)
+		return nil, fmt.Errorf("invalid go.mod file: %s", moduleFilename)
 	}
 
 	modulePath := modFile.Module.Mod.Path
@@ -121,7 +144,7 @@ func Sort(filename string, sorter Sorter) error {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, filename, nil, parser.ParseComments)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	importSet := collection.NewArraySet[ImportPath]()
@@ -169,21 +192,17 @@ func Sort(filename string, sorter Sorter) error {
 		}
 	}
 
-	rewriteImport(fset, f, specs)
+	rewriteImport(f, specs)
 	deletedOriginImportCommentGroup(f, commentGroups)
 	var buffer = bytes.NewBuffer(nil)
 	_ = printer.Fprint(buffer, fset, f)
 
 	result, err := format.Source(buffer.Bytes())
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	if writer, ok := sorter.(io.Writer); ok {
-		_, _ = writer.Write(result)
-	}
-
-	return nil
+	return result, nil
 }
 
 func deletedOriginImportCommentGroup(f *ast.File, originCommentGroup commentGroups) {
@@ -230,13 +249,13 @@ func getGoModFile(file string) string {
 	}
 }
 
-func rewriteImport(fset *token.FileSet, f *ast.File, specs []ast.Spec) {
+func rewriteImport(f *ast.File, specs []ast.Spec) {
 	var written bool
 	var decls []ast.Decl
 	for _, d := range f.Decls {
 		decl, ok := d.(*ast.GenDecl)
-		if !ok || decl.Tok != token.IMPORT {
-			decls = append(decls, decl)
+		if !ok {
+			decls = append(decls, d)
 			continue
 		}
 		if !written {
