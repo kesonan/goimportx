@@ -10,6 +10,7 @@ goimportx is a tool to help you manage your go imports.
 - Only support go module.
 - Use golang official sort algorithm.
 - Automatically remove parentheses when there is only one import.
+- Automatically remove duplicate empty new-line.
 
 ## Installation
 
