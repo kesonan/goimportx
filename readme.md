@@ -1,7 +1,8 @@
 # goimportx
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-gree.svg)](https://github.com/anqiansong/goimportx/blob/main/LICENSE)
+[![Go](https://github.com/anqiansong/goimportx/actions/workflows/go.yml/badge.svg)](https://github.com/anqiansong/goimportx/actions/workflows/go.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/anqiansong/goimportx.svg)](https://pkg.go.dev/github.com/anqiansong/goimportx)
+[![License: MIT](https://img.shields.io/badge/License-MIT-gree.svg)](https://github.com/anqiansong/goimportx/blob/main/LICENSE)
 
 goimportx is a tool to help you manage your go imports.
 
