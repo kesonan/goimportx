@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 
 	"github.com/anqiansong/goimportx/pkg/importx"
 	"github.com/spf13/cobra"
@@ -18,27 +19,36 @@ var rootCmd = &cobra.Command{
 			return err
 		}
 
-		result, err := importx.Sort(file, nil)
-		if err != nil {
-			return err
+		var list []string
+		for _, file := range files {
+			list = append(list, strings.FieldsFunc(file, func(r rune) bool {
+				return r == ',' || r == '|'
+			})...)
 		}
 
-		if write {
-			_ = os.WriteFile(file, result, 0644)
-		} else {
-			_, _ = fmt.Fprint(os.Stdout, string(result))
+		for _, file := range list {
+			result, err := importx.Sort(file, nil)
+			if err != nil {
+				return err
+			}
+
+			if write {
+				_ = os.WriteFile(file, result, 0644)
+			} else {
+				_, _ = fmt.Fprint(os.Stdout, string(result))
+			}
 		}
 
 		return nil
 	},
 }
 
-var file string
+var files []string
 var group string
 var write bool
 
 func init() {
-	rootCmd.Flags().StringVarP(&file, "file", "f", "", "file path")
+	rootCmd.Flags().StringSliceVarP(&files, "file", "f", nil, "file path")
 	rootCmd.Flags().StringVarP(&group, "group", "g", "system,local,third", "group rule, split by comma, only supports [system,local,third,others]")
 	rootCmd.Flags().BoolVarP(&write, "write", "w", false, "write result to (source) file instead of stdout")
 }
