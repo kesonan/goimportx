@@ -254,11 +254,7 @@ func rewriteImport(f *ast.File, specs []ast.Spec) {
 	var decls []ast.Decl
 	for _, d := range f.Decls {
 		decl, ok := d.(*ast.GenDecl)
-		if !ok {
-			decls = append(decls, d)
-			continue
-		}
-		if !written {
+		if ok && !written && isImportDecl(decl) {
 			decl.Specs = specs
 			if len(specs) == 1 {
 				decl.Lparen = 0
@@ -266,9 +262,22 @@ func rewriteImport(f *ast.File, specs []ast.Spec) {
 			}
 			written = true
 			decls = append(decls, decl)
+		} else {
+			decls = append(decls, d)
 		}
 	}
+
 	f.Decls = decls
+}
+
+func isImportDecl(decl *ast.GenDecl) bool {
+	for _, spec := range decl.Specs {
+		_, ok := spec.(*ast.ImportSpec)
+		if !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func importSpecIterator(f *ast.File, modulePath string, iterator func(decl *ast.GenDecl, spec ast.Spec, path ImportPath)) {
