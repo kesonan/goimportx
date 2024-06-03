@@ -67,7 +67,7 @@ func init() {
 
 func Execute() {
 	rootCmd.Version = fmt.Sprintf(
-		"%s %s/%s", "v0.0.1",
+		"%s %s/%s", "v1.0.0",
 		runtime.GOOS, runtime.GOARCH)
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(-1)
